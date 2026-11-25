@@ -88,17 +88,22 @@ impl SharedState {
         Ok(())
     }
 
-    pub async fn broadcast(&self, channel: &str, frame: ServerFrame, except: Option<u64>) {
+    /// Broadcast `frame` to every member of `channel`. Returns how many sends succeeded.
+    pub async fn broadcast(&self, channel: &str, frame: ServerFrame, except: Option<u64>) -> usize {
         let guard = self.inner.read().await;
         let Some(members) = guard.channels.get(channel) else {
-            return;
+            return 0;
         };
+        let mut sent = 0;
         for (conn_id, tx) in members {
             if except.is_some_and(|id| id == *conn_id) {
                 continue;
             }
-            let _ = tx.send(frame.clone());
+            if tx.send(frame.clone()).is_ok() {
+                sent += 1;
+            }
         }
+        sent
     }
 
     pub async fn remove_connection(&self, conn_id: u64) {

@@ -1,3 +1,4 @@
+mod action_log;
 mod auth;
 mod client;
 mod config;

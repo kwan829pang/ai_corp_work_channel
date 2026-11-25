@@ -1,10 +1,10 @@
+use crate::action_log::ActionLogger;
 use crate::auth::{self, AuthError};
 use crate::config::Config;
-use crate::mention::extract_mentions;
 use crate::protocol::{ClientFrame, ServerFrame};
+use crate::server::publish;
 use crate::server::state::SharedState;
 use anyhow::{Context, Result};
-use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -15,6 +15,7 @@ pub async fn handle_connection(
     conn_id: u64,
     state: SharedState,
     config: Config,
+    action_log: ActionLogger,
 ) -> Result<()> {
     let peer = stream
         .peer_addr()
@@ -46,7 +47,7 @@ pub async fn handle_connection(
         }
     });
 
-    let result = run_session(conn_id, &mut lines, &out_tx, &state, &config).await;
+    let result = run_session(conn_id, &mut lines, &out_tx, &state, &config, &action_log).await;
 
     state.remove_connection(conn_id).await;
     drop(out_tx);
@@ -66,8 +67,9 @@ async fn run_session(
     out_tx: &mpsc::UnboundedSender<ServerFrame>,
     state: &SharedState,
     config: &Config,
+    action_log: &ActionLogger,
 ) -> Result<()> {
-let nickname = match authenticate(conn_id, lines, out_tx, state, config).await? {
+    let nickname = match authenticate(conn_id, lines, out_tx, state, config, action_log).await? {
         Some(n) => n,
         None => return Ok(()),
     };
@@ -78,6 +80,7 @@ let nickname = match authenticate(conn_id, lines, out_tx, state, config).await? 
         out_tx,
         state,
         config,
+        action_log,
     };
 
     while let Some(line) = lines.next_line().await.context("read line")? {
@@ -129,6 +132,7 @@ async fn authenticate(
     out_tx: &mpsc::UnboundedSender<ServerFrame>,
     state: &SharedState,
     config: &Config,
+    action_log: &ActionLogger,
 ) -> Result<Option<String>> {
     let Some(line) = lines.next_line().await.context("read auth line")? else {
         return Ok(None);
@@ -185,6 +189,7 @@ async fn authenticate(
     };
 
     state.register_outbound(conn_id, out_tx.clone()).await;
+    action_log.record("auth", &nickname, None);
 
     let _ = out_tx.send(ServerFrame::AuthOk {
         token,
@@ -199,6 +204,7 @@ struct SessionCtx<'a> {
     out_tx: &'a mpsc::UnboundedSender<ServerFrame>,
     state: &'a SharedState,
     config: &'a Config,
+    action_log: &'a ActionLogger,
 }
 
 async fn handle_join(ctx: &SessionCtx<'_>, token: &str, channel: &str) -> Result<(), ServerFrame> {
@@ -219,6 +225,8 @@ async fn handle_join(ctx: &SessionCtx<'_>, token: &str, channel: &str) -> Result
         .join_channel(ctx.conn_id, channel, ctx.out_tx.clone())
         .await
         .map_err(|e| ServerFrame::error("join_failed", e))?;
+
+    ctx.action_log.record("join", ctx.nickname, Some(channel));
 
     let _ = ctx.out_tx.send(ServerFrame::Joined {
         channel: channel.to_string(),
@@ -251,55 +259,16 @@ async fn handle_message(
         .await
         .map_err(|e| ServerFrame::error("join_failed", e))?;
 
-    let submit_at = Utc::now().timestamp();
-    let frame = ServerFrame::Message {
-        channel: channel.to_string(),
-        content: content.to_string(),
-        name: ctx.nickname.to_string(),
-        submit_at,
-    };
-
-    ctx.state.broadcast(channel, frame, None).await;
-    route_mention_dms(ctx, channel, content, submit_at).await;
-    Ok(())
-}
-
-async fn route_mention_dms(ctx: &SessionCtx<'_>, channel: &str, content: &str, submit_at: i64) {
-    let mentions = extract_mentions(content);
-    if mentions.is_empty() {
-        return;
-    }
-
-    let sender_key = ctx.nickname.to_ascii_lowercase();
-    let mut delivered = Vec::new();
-    let mut offline = Vec::new();
-
-    for mention in mentions {
-        if mention.to_ascii_lowercase() == sender_key {
-            continue;
-        }
-
-        let dm = ServerFrame::Dm {
-            from: ctx.nickname.to_string(),
-            to: mention.clone(),
-            channel: channel.to_string(),
-            content: content.to_string(),
-            submit_at,
-        };
-
-        if ctx.state.send_to_nickname(&mention, dm).await {
-            delivered.push(mention);
-        } else {
-            offline.push(mention);
-        }
-    }
-
-    if !delivered.is_empty() || !offline.is_empty() {
+    let outcome = publish::publish_message(ctx.state, channel, ctx.nickname, content).await;
+    ctx.action_log
+        .record("message", ctx.nickname, Some(channel));
+    if !outcome.mentions_delivered.is_empty() || !outcome.mentions_offline.is_empty() {
         let _ = ctx.out_tx.send(ServerFrame::MentionResult {
-            delivered,
-            offline,
+            delivered: outcome.mentions_delivered,
+            offline: outcome.mentions_offline,
         });
     }
+    Ok(())
 }
 
 fn map_auth_error(err: AuthError) -> ServerFrame {

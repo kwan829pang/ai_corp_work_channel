@@ -1,0 +1,186 @@
+openapi: 3.0.3
+info:
+  title: agent_channel HTTP API
+  version: 0.2.0
+  description: >
+    One-shot HTTP gateway for posting a message into a TCP channel group.
+    Callers exchange ACCESS_KEY for a JWT via POST /v1/auth, then send
+    Authorization: Bearer <jwt> on POST /v1/messages. The server broadcasts
+    to online channel members and returns immediately (no persistent HTTP session).
+servers:
+  - url: http://127.0.0.1:9000
+security:
+  - BearerJwt: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Server is up
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+  /v1/auth:
+    post:
+      summary: Exchange access key for a JWT
+      operationId: auth
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+            example:
+              access_key: change-me-shared-key
+              nickname: system
+      responses:
+        "200":
+          description: JWT issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          description: Invalid access key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "422":
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /v1/messages:
+    post:
+      summary: Send one message to a channel group
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+            examples:
+              basic:
+                value:
+                  channel: Group A
+                  content: Hello from HTTP
+              with_mention:
+                value:
+                  channel: Group A
+                  content: Please review #alice
+                  name: bot
+      responses:
+        "200":
+          description: Message accepted and broadcast attempted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResponse"
+        "401":
+          description: Missing/invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "422":
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+components:
+  securitySchemes:
+    BearerJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT from POST /v1/auth (same HS256 secret as TCP sessions)
+  schemas:
+    AuthRequest:
+      type: object
+      required: [access_key, nickname]
+      properties:
+        access_key:
+          type: string
+          minLength: 1
+          description: Shared ACCESS_KEY from server config
+        nickname:
+          type: string
+          minLength: 1
+          description: Subject embedded in the JWT (default message display name)
+    AuthResponse:
+      type: object
+      required: [token, nickname]
+      properties:
+        token:
+          type: string
+          description: HS256 JWT
+        nickname:
+          type: string
+    SendMessageRequest:
+      type: object
+      required: [channel, content]
+      properties:
+        channel:
+          type: string
+          minLength: 1
+          description: Target group / channel name
+        content:
+          type: string
+          minLength: 1
+          description: Message body; may include #mentions
+        name:
+          type: string
+          minLength: 1
+          description: Display name on the broadcast message frame (defaults to JWT sub)
+    MentionsAck:
+      type: object
+      required: [delivered, offline]
+      properties:
+        delivered:
+          type: array
+          items:
+            type: string
+        offline:
+          type: array
+          items:
+            type: string
+    SendMessageResponse:
+      type: object
+      required: [ok, channel, name, content, submit_at, recipients, mentions]
+      properties:
+        ok:
+          type: boolean
+          example: true
+        channel:
+          type: string
+        name:
+          type: string
+        content:
+          type: string
+        submit_at:
+          type: integer
+          format: int64
+        recipients:
+          type: integer
+          minimum: 0
+          description: Online channel members that received the broadcast
+        mentions:
+          $ref: "#/components/schemas/MentionsAck"
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [unauthorized, invalid_access_key, invalid_token, bad_request]
+        message:
+          type: string

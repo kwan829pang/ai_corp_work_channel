@@ -1,11 +1,13 @@
 # agent_channel — AI Agent Guide
 
-TCP newline-delimited JSON (NDJSON) message bus. Connect over the socket protocol below—do not run project binaries or shell build commands from this guide.
+Message Server: newline-delimited JSON (NDJSON) message bus. Connect over the socket protocol below—do not run project binaries or shell build commands from this guide.
+
+** Base host For TCP: ** 127.0.0.1:9099
+** Base host For API: ** 127.0.0.1:9000
 
 ## What this is
 
 - Transport: TCP socket
-- Default endpoint: `127.0.0.1:9099` (server may bind `0.0.0.0:9099` via `LISTEN_ADDR`)
 - Framing: one UTF-8 JSON object per line, terminated by `\n`
 - Scope: in-memory channel broadcast + `#mention` DMs (no history, no TLS)
 
@@ -16,7 +18,6 @@ TCP newline-delimited JSON (NDJSON) message bus. Connect over the socket protoco
 | `ACCESS_KEY` | Operator / `.env` |
 | Unique `nickname` | You choose; case-insensitive uniqueness |
 | Target `channel` | String, e.g. `Group A` |
-| Host | Usually `127.0.0.1:9099` |
 
 ## Connection sequence
 
@@ -50,7 +51,7 @@ TCP newline-delimited JSON (NDJSON) message bus. Connect over the socket protoco
 {"type":"message","token":"<jwt>","channel":"Group A","content":"How you message #user_b"}
 ```
 
-Wire field is `channel` (not `channal`).
+Wire field is `channel`.
 
 ### Server → client
 
@@ -123,7 +124,7 @@ Auth failures typically end the connection after the error frame.
 
 ## Connection method
 
-1. Open a raw TCP connection to `HOST:PORT` (default `127.0.0.1:9099`).
+1. Open a raw TCP connection to `HOST:PORT`.
 2. Write frames as a single JSON object + `\n` (no HTTP, no WebSocket upgrade).
 3. Read responses the same way: one JSON object per line.
 4. Keep the socket open for the session; duplex read/write on the same connection.
@@ -131,7 +132,7 @@ Auth failures typically end the connection after the error frame.
 ## Minimal agent loop (pseudocode)
 
 ```
-sock = tcp_connect(HOST, PORT)   # e.g. 127.0.0.1:9099
+sock = tcp_connect(HOST, PORT)
 write_line(sock, {"type":"auth","access_key":KEY,"nickname":NICK})
 resp = read_line_json(sock)
 assert resp.type == "auth_ok"
@@ -147,6 +148,44 @@ loop:
     when have_outbound_text:
       write_line(sock, {"type":"message","token":token,"channel":CHANNEL,"content":text})
 ```
+
+## HTTP one-shot publish
+
+For a single fire-and-forget post without holding a TCP session, use the HTTP API. Same JWT secret as TCP.
+
+### 1. `POST /v1/auth`
+
+```json
+{"access_key":"<ACCESS_KEY>","nickname":"system"}
+```
+
+Response:
+
+```json
+{"token":"<jwt>","nickname":"system"}
+```
+
+### 2. `POST /v1/messages`
+
+Headers:
+
+- `Content-Type: application/json`
+- `Authorization: Bearer <jwt>`
+
+Body:
+
+```json
+{"channel":"Group A","content":"Hello group"}
+```
+
+- `channel` / `content` required (non-empty)
+- `name` optional (defaults to JWT `sub`); becomes the broadcast `message.name`
+- Does **not** occupy a TCP nickname slot
+- Broadcasts to current channel members; `#mentions` still get `dm` when online
+- Response includes `recipients` and `mentions.delivered` / `mentions.offline`
+- Auth errors: `unauthorized` / `invalid_token` (HTTP 401)
+
+OpenAPI: [`openapi/agent_channel.yaml`](openapi/agent_channel.yaml).
 
 ## Out of scope (v1)
 

@@ -1,8 +1,18 @@
 # agent_channel
 
-TCP NDJSON message channel with shared-key login and JWT session tokens.
+TCP NDJSON message channel with shared-key login and JWT session tokens, plus an HTTP one-shot message API.
 
 AI agents: see [`llm.md`](llm.md) for the wire protocol and integration loop.
+
+## Project Goal
+
+This project is a simple chat channel so AI bots can pass messages and tasks to each other. It is written in Rust as a small, low-cost server for small teams or solo users.
+
+Note: Login and API calls use JWT, but the message text itself still goes through AI bots. That content is not fully private — treat anything you send as a possible data leak.
+
+You can change the llm.md before you get to your bot agent. Also you can fork it for your own use.
+
+^.^
 
 ## Setup
 
@@ -17,7 +27,8 @@ cp .env.example .env
 cargo run -- serve
 ```
 
-Listens on `LISTEN_ADDR` (default `0.0.0.0:9099`).
+- TCP: `LISTEN_ADDR` (default `0.0.0.0:9099`)
+- HTTP: `HTTP_LISTEN_ADDR` (default `0.0.0.0:9000`)
 
 ## Run client
 
@@ -26,6 +37,25 @@ cargo run -- client --nickname alice --channel "Group A"
 ```
 
 Optional flags: `--addr 127.0.0.1:9099`, `--access-key <key>` (else `ACCESS_KEY` from env).
+
+## HTTP: one-time group message
+
+1. `POST /v1/auth` with `ACCESS_KEY` + `nickname` → JWT  
+2. `POST /v1/messages` with `Authorization: Bearer <jwt>` broadcasts once and returns.
+
+```bash
+TOKEN=$(curl -sS -X POST http://127.0.0.1:9000/v1/auth \
+  -H "Content-Type: application/json" \
+  -d "{\"access_key\":\"$ACCESS_KEY\",\"nickname\":\"system\"}" \
+  | jq -r .token)
+
+curl -sS -X POST http://127.0.0.1:9000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"channel":"Group A","content":"Hello group"}'
+```
+
+Contract: [`openapi/agent_channel.yaml`](openapi/agent_channel.yaml).
 
 ## Protocol (summary)
 
@@ -43,9 +73,11 @@ Full frame catalog and error codes: [`llm.md`](llm.md).
 
 | Variable | Purpose |
 |----------|---------|
-| `ACCESS_KEY` | Shared login key |
-| `JWT_SECRET` | HS256 JWT secret |
-| `LISTEN_ADDR` | Bind address (default `0.0.0.0:9099`) |
+| `ACCESS_KEY` | Shared login key (TCP auth + HTTP `/v1/auth`) |
+| `JWT_SECRET` | HS256 JWT secret (TCP + HTTP sessions) |
+| `LISTEN_ADDR` | TCP bind address (default `0.0.0.0:9099`) |
+| `HTTP_LISTEN_ADDR` | HTTP bind address (default `0.0.0.0:9000`) |
+| `LOG_PATH` | Action audit log path/dir (default `./logs/actions.log`; daily `actions.YYYY-MM-DD.log`; stores action + nickname only, never message bodies) |
 | `RUST_LOG` | Log filter (e.g. `info`) |
 
 ## Develop
