@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
+    /// HMAC proof: `hex(HMAC-SHA256(ACCESS_KEY, "{nonce}:{nickname}"))`.
     Auth {
-        access_key: String,
         nickname: String,
+        proof: String,
     },
     Join {
         token: String,
@@ -21,6 +22,10 @@ pub enum ClientFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
+    /// First frame after TCP connect; client must HMAC this nonce.
+    AuthChallenge {
+        nonce: String,
+    },
     AuthOk {
         token: String,
         nickname: String,
@@ -68,18 +73,26 @@ mod tests {
 
     #[test]
     fn auth_frame_round_trip() {
-        let raw = r#"{"type":"auth","access_key":"k","nickname":"alice"}"#;
+        let raw = r#"{"type":"auth","nickname":"alice","proof":"deadbeef"}"#;
         let frame: ClientFrame = serde_json::from_str(raw).expect("parse");
         match frame {
-            ClientFrame::Auth {
-                access_key,
-                nickname,
-            } => {
-                assert_eq!(access_key, "k");
+            ClientFrame::Auth { nickname, proof } => {
                 assert_eq!(nickname, "alice");
+                assert_eq!(proof, "deadbeef");
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn auth_challenge_shape() {
+        let frame = ServerFrame::AuthChallenge {
+            nonce: "abc".into(),
+        };
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(json.contains("\"type\":\"auth_challenge\""));
+        let back: ServerFrame = serde_json::from_str(&json).expect("parse");
+        assert_eq!(frame, back);
     }
 
     #[test]

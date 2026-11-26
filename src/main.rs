@@ -3,6 +3,7 @@ mod auth;
 mod client;
 mod config;
 mod mention;
+mod nonce_store;
 mod protocol;
 mod server;
 

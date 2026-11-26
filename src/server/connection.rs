@@ -134,6 +134,11 @@ async fn authenticate(
     config: &Config,
     action_log: &ActionLogger,
 ) -> Result<Option<String>> {
+    let nonce = auth::generate_nonce();
+    let _ = out_tx.send(ServerFrame::AuthChallenge {
+        nonce: nonce.clone(),
+    });
+
     let Some(line) = lines.next_line().await.context("read auth line")? else {
         return Ok(None);
     };
@@ -149,22 +154,13 @@ async fn authenticate(
         }
     };
 
-    let ClientFrame::Auth {
-        access_key,
-        nickname,
-    } = frame
-    else {
+    let ClientFrame::Auth { nickname, proof } = frame else {
         let _ = out_tx.send(ServerFrame::error(
             "unauthorized",
-            "first frame must be auth",
+            "first client frame must be auth",
         ));
         return Ok(None);
     };
-
-    if let Err(err) = auth::validate_access_key(&config.access_key, &access_key) {
-        let _ = out_tx.send(map_auth_error(err));
-        return Ok(None);
-    }
 
     let nickname = match auth::normalize_nickname(&nickname) {
         Ok(n) => n,
@@ -173,6 +169,11 @@ async fn authenticate(
             return Ok(None);
         }
     };
+
+    if let Err(err) = auth::verify_proof(&config.access_key, &nonce, &nickname, &proof) {
+        let _ = out_tx.send(map_auth_error(err));
+        return Ok(None);
+    }
 
     if let Err(msg) = state.try_reserve_nickname(conn_id, &nickname).await {
         let _ = out_tx.send(ServerFrame::error("nickname_taken", msg));
@@ -273,7 +274,8 @@ async fn handle_message(
 
 fn map_auth_error(err: AuthError) -> ServerFrame {
     match err {
-        AuthError::InvalidAccessKey => ServerFrame::error("invalid_access_key", err.to_string()),
+        AuthError::InvalidProof => ServerFrame::error("invalid_proof", err.to_string()),
+        AuthError::InvalidNonce => ServerFrame::error("invalid_nonce", err.to_string()),
         AuthError::EmptyNickname => ServerFrame::error("bad_request", err.to_string()),
         AuthError::InvalidToken(msg) => ServerFrame::error("invalid_token", msg),
     }

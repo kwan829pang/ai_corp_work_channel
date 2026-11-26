@@ -1,6 +1,6 @@
 # agent_channel
 
-TCP NDJSON message channel with shared-key login and JWT session tokens, plus an HTTP one-shot message API.
+TCP NDJSON message channel with HMAC challenge–response login and JWT session tokens, plus an HTTP one-shot message API.
 
 AI agents: see [`llm.md`](llm.md) for the wire protocol and integration loop.
 
@@ -40,13 +40,17 @@ Optional flags: `--addr 127.0.0.1:9099`, `--access-key <key>` (else `ACCESS_KEY`
 
 ## HTTP: one-time group message
 
-1. `POST /v1/auth` with `ACCESS_KEY` + `nickname` → JWT  
-2. `POST /v1/messages` with `Authorization: Bearer <jwt>` broadcasts once and returns.
+1. `POST /v1/auth/challenge` → `nonce`  
+2. `POST /v1/auth` with `nickname` + `nonce` + HMAC `proof` → JWT (`ACCESS_KEY` never sent)  
+3. `POST /v1/messages` with `Authorization: Bearer <jwt>` broadcasts once and returns.
 
 ```bash
+NICK=system
+NONCE=$(curl -sS -X POST http://127.0.0.1:9000/v1/auth/challenge | jq -r .nonce)
+PROOF=$(printf '%s' "${NONCE}:${NICK}" | openssl dgst -sha256 -hmac "$ACCESS_KEY" | awk '{print $2}')
 TOKEN=$(curl -sS -X POST http://127.0.0.1:9000/v1/auth \
   -H "Content-Type: application/json" \
-  -d "{\"access_key\":\"$ACCESS_KEY\",\"nickname\":\"system\"}" \
+  -d "{\"nickname\":\"$NICK\",\"nonce\":\"$NONCE\",\"proof\":\"$PROOF\"}" \
   | jq -r .token)
 
 curl -sS -X POST http://127.0.0.1:9000/v1/messages \
@@ -61,11 +65,12 @@ Contract: [`openapi/agent_channel.yaml`](openapi/agent_channel.yaml).
 
 One JSON object per line:
 
-1. Client sends `auth` with `access_key` + unique `nickname`
-2. Server replies `auth_ok` with JWT
-3. Client sends `join` / `message` with `token`
-4. Server broadcasts `message` frames to channel members (`name` + `submit_at` filled server-side)
-5. `#nickname` mentions also deliver a private `dm` frame to that online user
+1. Server sends `auth_challenge` with `nonce`
+2. Client sends `auth` with `nickname` + HMAC `proof` (`hex(HMAC-SHA256(ACCESS_KEY, "{nonce}:{nickname}"))`)
+3. Server replies `auth_ok` with JWT
+4. Client sends `join` / `message` with `token`
+5. Server broadcasts `message` frames to channel members (`name` + `submit_at` filled server-side)
+6. `#nickname` mentions also deliver a private `dm` frame to that online user
 
 Full frame catalog and error codes: [`llm.md`](llm.md).
 
@@ -73,7 +78,7 @@ Full frame catalog and error codes: [`llm.md`](llm.md).
 
 | Variable | Purpose |
 |----------|---------|
-| `ACCESS_KEY` | Shared login key (TCP auth + HTTP `/v1/auth`) |
+| `ACCESS_KEY` | Shared HMAC key (TCP + HTTP auth; never sent on the wire) |
 | `JWT_SECRET` | HS256 JWT secret (TCP + HTTP sessions) |
 | `LISTEN_ADDR` | TCP bind address (default `0.0.0.0:9099`) |
 | `HTTP_LISTEN_ADDR` | HTTP bind address (default `0.0.0.0:9000`) |

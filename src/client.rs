@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::protocol::{ClientFrame, ServerFrame};
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -12,7 +13,7 @@ pub struct ClientArgs {
     #[arg(long, default_value = "127.0.0.1:9099")]
     pub addr: String,
 
-    /// Shared access key (defaults to ACCESS_KEY env)
+    /// Shared access key (defaults to ACCESS_KEY env); never sent on the wire
     #[arg(long)]
     pub access_key: Option<String>,
 
@@ -38,11 +39,27 @@ pub async fn run(args: ClientArgs) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
+    let Some(challenge_line) = lines.next_line().await? else {
+        bail!("server closed before auth_challenge");
+    };
+    let challenge: ServerFrame =
+        serde_json::from_str(&challenge_line).context("parse auth_challenge")?;
+    let nonce = match challenge {
+        ServerFrame::AuthChallenge { nonce } => nonce,
+        ServerFrame::Error { code, message } => {
+            bail!("auth challenge failed: {code}: {message}");
+        }
+        other => bail!("expected auth_challenge, got: {other:?}"),
+    };
+
+    let nickname = auth::normalize_nickname(&args.nickname).context("nickname")?;
+    let proof = auth::compute_proof(&access_key, &nonce, &nickname).context("hmac proof")?;
+
     send_frame(
         &mut writer,
         &ClientFrame::Auth {
-            access_key,
-            nickname: args.nickname.clone(),
+            nickname: nickname.clone(),
+            proof,
         },
     )
     .await?;
@@ -52,8 +69,11 @@ pub async fn run(args: ClientArgs) -> Result<()> {
     };
     let auth_resp: ServerFrame = serde_json::from_str(&line).context("parse auth response")?;
     let token = match auth_resp {
-        ServerFrame::AuthOk { token, nickname } => {
-            info!(%nickname, "authenticated");
+        ServerFrame::AuthOk {
+            token,
+            nickname: nick,
+        } => {
+            info!(%nick, "authenticated");
             token
         }
         ServerFrame::Error { code, message } => {

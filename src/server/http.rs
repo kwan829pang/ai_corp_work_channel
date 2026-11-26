@@ -1,6 +1,7 @@
 use crate::action_log::ActionLogger;
 use crate::auth::{self, AuthError};
 use crate::config::Config;
+use crate::nonce_store::NonceStore;
 use crate::server::publish;
 use crate::server::state::SharedState;
 use axum::extract::State;
@@ -17,12 +18,20 @@ struct AppState {
     shared: SharedState,
     config: Config,
     action_log: ActionLogger,
+    nonces: NonceStore,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChallengeResponse {
+    pub nonce: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AuthRequest {
-    pub access_key: String,
     pub nickname: String,
+    pub nonce: String,
+    /// `hex(HMAC-SHA256(ACCESS_KEY, "{nonce}:{nickname}"))`
+    pub proof: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,7 +74,8 @@ struct ErrorBody {
 
 enum ApiError {
     Unauthorized,
-    InvalidAccessKey,
+    InvalidProof,
+    InvalidNonce,
     InvalidToken(String),
     BadRequest(String),
 }
@@ -78,10 +88,15 @@ impl IntoResponse for ApiError {
                 "unauthorized",
                 "missing or invalid authorization".to_string(),
             ),
-            Self::InvalidAccessKey => (
+            Self::InvalidProof => (
                 StatusCode::UNAUTHORIZED,
-                "invalid_access_key",
-                "invalid access key".to_string(),
+                "invalid_proof",
+                "invalid auth proof".to_string(),
+            ),
+            Self::InvalidNonce => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_nonce",
+                "invalid or expired nonce".to_string(),
             ),
             Self::InvalidToken(message) => (StatusCode::UNAUTHORIZED, "invalid_token", message),
             Self::BadRequest(message) => (StatusCode::UNPROCESSABLE_ENTITY, "bad_request", message),
@@ -100,7 +115,8 @@ impl IntoResponse for ApiError {
 impl From<AuthError> for ApiError {
     fn from(err: AuthError) -> Self {
         match err {
-            AuthError::InvalidAccessKey => Self::InvalidAccessKey,
+            AuthError::InvalidProof => Self::InvalidProof,
+            AuthError::InvalidNonce => Self::InvalidNonce,
             AuthError::EmptyNickname => Self::BadRequest(err.to_string()),
             AuthError::InvalidToken(message) => Self::InvalidToken(message),
         }
@@ -115,12 +131,14 @@ pub async fn run(
     let addr = config.http_listen_addr.clone();
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/auth/challenge", post(auth_challenge))
         .route("/v1/auth", post(auth))
         .route("/v1/messages", post(send_message))
         .with_state(AppState {
             shared,
             config,
             action_log,
+            nonces: NonceStore::default(),
         });
 
     let listener = TcpListener::bind(&addr).await?;
@@ -133,12 +151,18 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+async fn auth_challenge(State(app): State<AppState>) -> Json<ChallengeResponse> {
+    let nonce = app.nonces.issue().await;
+    Json(ChallengeResponse { nonce })
+}
+
 async fn auth(
     State(app): State<AppState>,
     Json(body): Json<AuthRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    auth::validate_access_key(&app.config.access_key, &body.access_key)?;
     let nickname = auth::normalize_nickname(&body.nickname)?;
+    app.nonces.take(&body.nonce).await?;
+    auth::verify_proof(&app.config.access_key, &body.nonce, &nickname, &body.proof)?;
     let token = auth::issue_token(&nickname, &app.config.jwt_secret)?;
     app.action_log.record("http_auth", &nickname, None);
     Ok(Json(AuthResponse { token, nickname }))

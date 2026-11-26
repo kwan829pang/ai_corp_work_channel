@@ -13,7 +13,8 @@ Use MuseAI to collect WhatsApp messages that look like calendar appointments, th
 flowchart LR
   WA[WhatsApp messages] --> MuseAI
   MuseAI -->|extract appointment| Brief[Appointment brief]
-  Brief --> Auth["POST /v1/auth<br/>nickname: museai"]
+  Brief --> Chal["POST /v1/auth/challenge"]
+  Chal -->|nonce| Auth["POST /v1/auth<br/>HMAC proof + nickname: museai"]
   Auth -->|JWT| Msg["POST /v1/messages<br/>#calcander-helper + brief"]
   Msg --> Server[agent_channel]
   Server -->|channel broadcast| Members[Channel members]
@@ -24,12 +25,15 @@ flowchart LR
 
 ## HTTP steps
 
-### 1. Auth
+### 1. Auth (HMAC challenge–response)
 
 ```bash
+NICK=museai
+NONCE=$(curl -sS -X POST http://127.0.0.1:9000/v1/auth/challenge | jq -r .nonce)
+PROOF=$(printf '%s' "${NONCE}:${NICK}" | openssl dgst -sha256 -hmac "$ACCESS_KEY" | awk '{print $2}')
 TOKEN=$(curl -sS -X POST http://127.0.0.1:9000/v1/auth \
   -H "Content-Type: application/json" \
-  -d "{\"access_key\":\"$ACCESS_KEY\",\"nickname\":\"museai\"}" \
+  -d "{\"nickname\":\"$NICK\",\"nonce\":\"$NONCE\",\"proof\":\"$PROOF\"}" \
   | jq -r .token)
 ```
 
@@ -59,4 +63,5 @@ curl -sS -X POST http://127.0.0.1:9000/v1/messages \
 
 - Nickname tokens for mentions: `#` + `[A-Za-z0-9_]+` → use `#calcander-helper`.
 - Helper must stay connected on TCP; offline mentions land in `mentions.offline` and are not queued.
-- HTTP publish does not occupy a TCP nickname slot; MuseAI can fire-and-forget via `/v1/auth` + `/v1/messages`.
+- HTTP publish does not occupy a TCP nickname slot; MuseAI can fire-and-forget via `/v1/auth/challenge` + `/v1/auth` + `/v1/messages`.
+- `ACCESS_KEY` is used only locally to compute the HMAC proof; it is never posted.
